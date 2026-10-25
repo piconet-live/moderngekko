@@ -58,6 +58,8 @@ set(MODERNGEKKO_ACCEPTED_SOURCE_DISC_ID "" CACHE STRING
     "Source disc ID accepted by the optional disc preparer")
 option(MODERNGEKKO_USER_DIRECTORY_IN_DOCUMENTS
        "Place the branded user directory in Documents" OFF)
+set(MODERNGEKKO_FZGX_PORT_DIR "" CACHE PATH
+    "fzgx-multiplayer's port folder (core and moderngekko): builds the F-Zero GX port's adapter into the runner")
 set(MODERNGEKKO_FRONTEND_SDK "" CACHE PATH
     "Optional non-root sysroot containing X11 and audio development packages")
 
@@ -394,6 +396,10 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
 else()
     target_include_directories(moderngekko PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin_legacy")
+endif()
+
+if(MODERNGEKKO_FZGX_PORT_DIR AND MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
+    include("${MODERNGEKKO_FZGX_PORT_DIR}/moderngekko/port.cmake")
 endif()
 
 add_executable(moderngekko-module-info

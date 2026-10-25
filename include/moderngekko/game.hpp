@@ -35,7 +35,17 @@ struct GameInspectResult
   explicit operator bool() const { return metadata.has_value(); }
 };
 
-GameInspectResult InspectGame(const std::filesystem::path& root);
+// Whether InspectGame hashes every file under files/ into assets_sha256. That reads the whole game (1.4 GB and
+// twenty seconds for F-Zero GX on an NVMe disk); a caller that does not compare the hash skips it and gets an
+// empty assets_sha256.
+enum class GameAssets
+{
+  Hash,
+  Skip,
+};
+
+GameInspectResult InspectGame(const std::filesystem::path& root,
+                              GameAssets assets = GameAssets::Hash);
 std::optional<std::string> HashFileSha256(const std::filesystem::path& path);
 std::optional<std::string> HashDirectorySha256(const std::filesystem::path& root);
 }  // namespace moderngekko

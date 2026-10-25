@@ -4,7 +4,11 @@
 #include "moderngekko/game.hpp"
 #include "moderngekko/runtime.hpp"
 #include "netplay_session.hpp"
+#ifdef MODERNGEKKO_FZGX_PORT
+#include "adapter.h"
+#endif
 
+#include "Common/RunSettings.h"
 #include "Common/StringUtil.h"
 
 #include <charconv>
@@ -56,6 +60,9 @@ void Usage() {
                "[--controller <device>]...\n"
                "       With no --game, boots the path in "
                "<user-dir>/default-game.txt.\n";
+#ifdef MODERNGEKKO_FZGX_PORT
+  std::cerr << fzgx_port::Usage();
+#endif
 }
 
 std::filesystem::path
@@ -144,6 +151,7 @@ int RunMain(int argc, char **argv) {
 #endif
   std::filesystem::path module_path;
   bool use_default_mods = true;
+  bool mods_named = false;
   std::optional<moderngekko::frontend::NetplayRole> netplay_role;
   std::string netplay_address;
   std::optional<std::uint16_t> netplay_port;
@@ -183,8 +191,10 @@ int RunMain(int argc, char **argv) {
       config.graphics.backend = value("--graphics");
     else if (arg == "--audio")
       config.audio.backend = value("--audio");
-    else if (arg == "--mods")
+    else if (arg == "--mods") {
       config.mod_directories.emplace_back(value("--mods"));
+      mods_named = true;
+    }
     else if (arg == "--no-mods")
       use_default_mods = false;
     else if (arg == "-X11" || arg == "--x11")
@@ -227,6 +237,10 @@ int RunMain(int argc, char **argv) {
       netplay_buffer = value("--buffer");
     else if (arg == "--controller")
       netplay_controllers.emplace_back(value("--controller"));
+#ifdef MODERNGEKKO_FZGX_PORT
+    else if (fzgx_port::TakeArgument(arg, [&] { return value(arg.c_str()); }))
+      ;
+#endif
     else if (arg == "--help" || arg == "-h") {
       Usage();
       return 0;
@@ -236,6 +250,14 @@ int RunMain(int argc, char **argv) {
       return 2;
     }
   }
+#ifdef MODERNGEKKO_FZGX_PORT
+  // The port's runner starts a game only as a launch file says (--config FILE). A start without one took its test
+  // settings from the environment, and could run the emulator's own compiler or this runner's own netplay.
+  if (const auto refused = fzgx_port::RefusedStart()) {
+    std::cerr << "fzgx: " << *refused << '\n';
+    return 2;
+  }
+#endif
   if (config.game_root.empty())
     config.game_root =
         ReadDefaultGame(config.user_directory, executable_directory);
@@ -253,7 +275,7 @@ int RunMain(int argc, char **argv) {
     return 2;
   }
   config.graphics.internal_resolution_scale = frontend_config.dolphin_scale;
-  if (config.graphics.backend.empty())
+  if (config.graphics.backend.empty() && !config.headless)  // headless: the Null backend (dolphin_runtime.cpp)
     config.graphics.backend = frontend_config.graphics_backend;
   config.fullscreen = frontend_config.fullscreen;
   config.show_fps_in_title = frontend_config.show_fps_in_title;
@@ -286,7 +308,15 @@ int RunMain(int argc, char **argv) {
   if (dol_changed)
     std::cout << "Applied native DOL patches\n";
 #endif
+  // The assets' hash is read only by a build that pins its game (MODERNGEKKO_REQUIRED_ASSETS_SHA256) and by
+  // netplay's compatibility check, which inspects the game again itself. A plain start does not pay for it: it was
+  // forty seconds of a blank window before the first frame (the game was hashed here and again in Runtime::Create).
+#ifdef MODERNGEKKO_REQUIRED_ASSETS_SHA256
   const auto inspected = moderngekko::InspectGame(config.game_root);
+#else
+  const auto inspected = moderngekko::InspectGame(
+      config.game_root, moderngekko::GameAssets::Skip);
+#endif
   if (!inspected) {
     std::cerr << "invalid game: " << inspected.error << '\n';
     return 2;
@@ -322,7 +352,7 @@ int RunMain(int argc, char **argv) {
 
   // Compatibility discovery belongs to the runner, never the runtime library.
   if (module_path.empty()) {
-    if (const char *env = std::getenv("STATICRECOMP_MODULE"))
+    if (const char *env = RunSettings::Get("STATICRECOMP_MODULE"))
       module_path = env;
     else {
       const std::string module_name =
@@ -345,6 +375,13 @@ int RunMain(int argc, char **argv) {
     config.graphics.backend = "Vulkan";
 #endif
 
+#ifdef MODERNGEKKO_FZGX_PORT
+  // The runner's own netplay starts the game without the port's adapter: not in a start its launch file rules.
+  if (netplay_role && fzgx_port::LaunchFileGiven()) {
+    std::cerr << "fzgx: --netplay-host and --netplay-join are refused in a start with a launch file (--config)\n";
+    return 2;
+  }
+#endif
   if (netplay_role) {
     moderngekko::frontend::NetplayOptions options;
     options.role = *netplay_role;
@@ -392,6 +429,23 @@ int RunMain(int argc, char **argv) {
         std::move(config), std::move(frontend_config), std::move(options));
   }
 
+#ifdef MODERNGEKKO_FZGX_PORT
+  // The port's launch file rules this start: it may refuse an option given above, and without its word no mod
+  // folder is searched.
+  fzgx_port::RunnerOptions asked;
+  asked.game_root = config.game_root;
+  asked.user_folder = config.user_directory;
+  asked.interpreter = config.allow_interpreter;
+  asked.mods_named = mods_named;
+  asked.automation = !config.automation.directory.empty();
+  asked.load_state = config.load_state_path.has_value();
+  if (const auto problem = fzgx_port::Prepare(asked)) {
+    std::cerr << "fzgx: " << *problem << '\n';
+    return 2;
+  }
+  if (!fzgx_port::SearchesMods())
+    config.mod_directories.clear();
+#endif
   auto created = moderngekko::Runtime::Create(std::move(config));
   if (!created) {
     std::cerr << "initialization failed: " << created.error->message << '\n';

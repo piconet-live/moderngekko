@@ -3,6 +3,7 @@
 #include "AudioCommon/AudioCommon.h"
 #include "Common/Config/Config.h"
 #include "Common/HookableEvent.h"
+#include "Common/RunSettings.h"
 #include "Common/StringUtil.h"
 #include "Core/Boot/Boot.h"
 #include "Core/Boot/BootManager.h"
@@ -30,6 +31,9 @@
 #include "moderngekko/cpu_state.h"
 #include "moderngekko/mod_loader.hpp"
 #include "moderngekko/module_loader.hpp"
+#ifdef MODERNGEKKO_FZGX_PORT
+#include "adapter.h"
+#endif
 
 #include <algorithm>
 #include <array>
@@ -97,7 +101,8 @@ std::string FormatWindowTitle(const std::string &title, double fps) {
 
 PowerPC::CPUCore SelectCPUCore() {
   static const bool static_recomp = [] {
-    const char *v = std::getenv("MODERNGEKKO_STATICRECOMP");
+    // this run's settings (Common/RunSettings.h): under a launch file only that file can ask for the JIT
+    const char *v = RunSettings::Get("MODERNGEKKO_STATICRECOMP");
     return !v || !*v || *v != '0';
   }();
   if (static_recomp)
@@ -554,7 +559,8 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
         RuntimeError{RuntimeErrorCode::AlreadyActive,
                      "only one ModernGekko runtime may be active per process"}};
 
-  GameInspectResult inspected = InspectGame(config.game_root);
+  // Only the disc ID, the name and the executable's path are used below.
+  GameInspectResult inspected = InspectGame(config.game_root, GameAssets::Skip);
   if (!inspected)
     return {{}, RuntimeError{RuntimeErrorCode::InvalidGame, inspected.error}};
 
@@ -658,6 +664,9 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
   impl->platform->SetTitle(impl->title);
 
   Config::SetBase(Config::MAIN_CPU_CORE, SelectCPUCore());
+  // Spike: FZGX_DUALCORE=1/0 forces the GPU onto its own thread or onto the CPU thread, for timing comparisons.
+  if (const char* dual = RunSettings::Get("FZGX_DUALCORE"))
+    Config::SetCurrent(Config::MAIN_CPU_THREAD, dual[0] == '1');
   if (!impl->config.graphics.backend.empty())
     Config::SetBase(Config::MAIN_GFX_BACKEND, impl->config.graphics.backend);
   else if (impl->config.headless)
@@ -700,11 +709,18 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
     recomp_source = StaticRecompModuleSource::Attached(
         reinterpret_cast<const StaticRecompModuleDesc *>(
             impl->config.module.descriptor));
+  // Spike: with no mods loaded, skip mod interception entirely (no host-call checks per dispatch).
+  if (!mod_report.loaded.empty() || RunSettings::Get("FZGX_KEEP_HOSTCALL")) {
   recomp_source.host_call = &ModManager::HostCall;
   recomp_source.host_call_contains = &ModManager::HostCallContains;
   recomp_source.host_call_range_contains =
       &ModManager::HostCallRangeContains;
   recomp_source.host_call_user = impl->mods.get();
+  }
+#ifdef MODERNGEKKO_FZGX_PORT
+  // The F-Zero GX port: its emulator settings, its per-frame tick and its host call, in front of the mod loader's.
+  fzgx_port::BeforeBoot(recomp_source);
+#endif
   jit.SetStaticRecompModuleSource(std::move(recomp_source));
 
   s_runtime_active = true;
@@ -821,6 +837,9 @@ RuntimeRunResult Runtime::Run() {
   StopAutomation();
   Core::Stop(Core::System::GetInstance());
   Core::Shutdown(Core::System::GetInstance());
+#ifdef MODERNGEKKO_FZGX_PORT
+  fzgx_port::AfterStop();
+#endif
   m_impl->booted = false;
   m_impl->running = false;
   return {};
